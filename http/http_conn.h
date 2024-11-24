@@ -19,16 +19,13 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <sys/uio.h>
-#include <pqxx/pqxx>
-#include <map>
-#include <string>
 #include "../lock/locker.h"
 #include "../CGImysql/sql_connection_pool.h"
 
 #include "../ConcurrentMemoryPool/Common.h"
 #include "../ConcurrentMemoryPool/ConcurrentAlloc.h"
 
-using namespace pqxx;
+
 
 class http_conn
 {
@@ -86,8 +83,7 @@ public:
     {
         return &m_address;
     }
-    // 初始化 PostgreSQL 查询结果
-    void initpostgres_result(connection_pool *connPool);
+    void initmysql_result(connection_pool *connPool);
 
 private:
     void init();
@@ -104,7 +100,7 @@ private:
     bool add_content(const char *content);
     bool add_status_line(int status, const char *title);
     bool add_headers(int content_length);
-    bool add_content_type();
+    bool add_content_type(const char *type);
     bool add_content_length(int content_length);
     bool add_linger();
     bool add_blank_line();
@@ -112,7 +108,7 @@ private:
 public:
     static int m_epollfd;
     static int m_user_count;
-    connection *postgres_conn; // PostgreSQL 连接
+    MYSQL *mysql;
 
 private:
     int m_sockfd;
@@ -142,7 +138,6 @@ private:
     char *m_string; //存储请求头数据
     int bytes_to_send;
     int bytes_have_send;
-
 };
 
 #endif
