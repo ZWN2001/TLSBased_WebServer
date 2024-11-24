@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <rapidjson/document.h>
+#include <rapidjson/writer.h>
+#include <rapidjson/stringbuffer.h>
 
 using namespace pqxx;
 
@@ -28,7 +31,7 @@ const char *error_500_title = "Internal Error";
 const char *error_500_form = "There was an unusual problem serving the request file.\n";
 
 //当浏览器出现连接重置时，可能是网站根目录出错或http响应格式出错或者访问的文件中内容完全为空
-const char *doc_root = "/home/chenjunyi/Desktop/WebServer/TinyWebServer-raw_version/root";
+const char *doc_root = "/home/ningmeng/server/root";
 
 //将表中的用户名和密码放入map
 map<string, string> users;
@@ -492,8 +495,239 @@ http_conn::HTTP_CODE http_conn::do_request()
         strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
         ConcurrentFree(m_url_real);
     }
-    else
-        strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
+    else if (strcmp(m_url, "/ping") == 0) {
+        // cout << "it is ping!" << endl;
+        const char *ping_response = "success";
+        add_status_line(200, "OK");
+        add_content_type("text/plain");
+        add_headers(strlen(ping_response));
+        if (!add_content(ping_response)) {
+            return INTERNAL_ERROR;
+        }
+        m_iv[0].iov_base = m_write_buf;
+        m_iv[0].iov_len = m_write_idx;
+        m_iv_count = 1;
+        bytes_to_send = m_write_idx;
+        return FILE_REQUEST;
+    }
+    else if (strcmp(m_url, "/api/bind") == 0 && m_method == POST) {
+        // 解析 POST 请求中的 JSON 数据
+        const char *json_data = m_string;
+        rapidjson::Document doc;
+        doc.Parse(json_data);
+
+        if (!doc.HasMember("deviceid") || !doc["deviceid"].IsString()) {
+            // deviceid 为空或格式非法
+            const char *response = R"({"code": 104})";
+            add_status_line(200, "OK");
+            add_content_type("application/json");
+            add_headers(strlen(response));
+            add_content(response);
+            m_iv[0].iov_base = m_write_buf;
+            m_iv[0].iov_len = m_write_idx;
+            m_iv_count = 1;
+            bytes_to_send = m_write_idx;
+            return FILE_REQUEST;
+        }
+
+        std::string deviceid = doc["deviceid"].GetString();
+
+        if (deviceid.length() != 36) {
+            // deviceid 长度非法
+            const char *response = R"({"code": 104})";
+            add_status_line(200, "OK");
+            add_content_type("application/json");
+            add_headers(strlen(response));
+            add_content(response);
+            m_iv[0].iov_base = m_write_buf;
+            m_iv[0].iov_len = m_write_idx;
+            m_iv_count = 1;
+            bytes_to_send = m_write_idx;
+            return FILE_REQUEST;
+        }
+
+        // 查询数据库是否已存在此 deviceid
+        char sql_query[256];
+        snprintf(sql_query, sizeof(sql_query), "SELECT userid FROM user_info WHERE deviceid='%s'", deviceid.c_str());
+        m_lock.lock();
+        int query_res = mysql_query(mysql, sql_query);
+        MYSQL_RES *result = mysql_store_result(mysql);
+        m_lock.unlock();
+
+        if (query_res == 0 && result != NULL) {
+            MYSQL_ROW row = mysql_fetch_row(result);
+            if (row) {
+                // deviceid 已存在，返回对应的 userid
+                long userid = atol(row[0]);
+                mysql_free_result(result);
+                char response[128];
+                snprintf(response, sizeof(response), R"({"code": 102, "userid": %ld})", userid);
+                add_status_line(200, "OK");
+                add_content_type("application/json");
+                add_headers(strlen(response));
+                add_content(response);
+                m_iv[0].iov_base = m_write_buf;
+                m_iv[0].iov_len = m_write_idx;
+                m_iv_count = 1;
+                bytes_to_send = m_write_idx;
+                return FILE_REQUEST;
+            }
+            mysql_free_result(result);
+        }
+
+        // 如果 deviceid 不存在，则创建新记录
+        char sql_insert[256];
+        snprintf(sql_insert, sizeof(sql_insert), "INSERT INTO user_info (deviceid) VALUES ('%s')", deviceid.c_str());
+        m_lock.lock();
+        int insert_res = mysql_query(mysql, sql_insert);
+        long userid = mysql_insert_id(mysql);  // 获取自增生成的 userid
+        m_lock.unlock();
+
+        if (insert_res == 0) {
+            // 返回创建成功的响应
+            char response[128];
+            snprintf(response, sizeof(response), R"({"code": 100, "userid": %ld})", userid);
+            add_status_line(200, "OK");
+            add_content_type("application/json");
+            add_headers(strlen(response));
+            add_content(response);
+            m_iv[0].iov_base = m_write_buf;
+            m_iv[0].iov_len = m_write_idx;
+            m_iv_count = 1;
+            bytes_to_send = m_write_idx;
+            return FILE_REQUEST;
+        } else {
+            // 数据库插入失败
+            const char *response = R"({"code": 500})";
+            add_status_line(500, "Internal Server Error");
+            add_content_type("application/json");
+            add_headers(strlen(response));
+            add_content(response);
+            m_iv[0].iov_base = m_write_buf;
+            m_iv[0].iov_len = m_write_idx;
+            m_iv_count = 1;
+            bytes_to_send = m_write_idx;
+            return FILE_REQUEST;
+        }
+    }
+    else if (strcmp(m_url, "/api/upload") == 0 && m_method == POST) {
+        // 解析 POST 请求中的 JSON 数据
+        const char *json_data = m_string;
+        rapidjson::Document doc;
+        doc.Parse(json_data);
+
+        if (!doc.HasMember("userid") || !doc["userid"].IsInt64() ||
+            !doc.HasMember("data") || !doc["data"].IsString()) {
+            // 参数缺失或格式非法
+            const char *response = R"({"code": 104})";
+            add_status_line(200, "OK");
+            add_content_type("application/json");
+            add_headers(strlen(response));
+            add_content(response);
+            m_iv[0].iov_base = m_write_buf;
+            m_iv[0].iov_len = m_write_idx;
+            m_iv_count = 1;
+            bytes_to_send = m_write_idx;
+            return FILE_REQUEST;
+        }
+
+        // 提取参数
+        long userid = doc["userid"].GetInt64();
+        std::string data = doc["data"].GetString();
+
+        if (data.length() > 256) {
+            // data 长度非法
+            const char *response = R"({"code": 104})";
+            add_status_line(200, "OK");
+            add_content_type("application/json");
+            add_headers(strlen(response));
+            add_content(response);
+            m_iv[0].iov_base = m_write_buf;
+            m_iv[0].iov_len = m_write_idx;
+            m_iv_count = 1;
+            bytes_to_send = m_write_idx;
+            return FILE_REQUEST;
+        }
+
+        // 检查数据库中是否存在该 userid
+        char sql_query[256];
+        snprintf(sql_query, sizeof(sql_query), "SELECT userid FROM user_data WHERE userid=%ld", userid);
+        m_lock.lock();
+        int query_res = mysql_query(mysql, sql_query);
+        MYSQL_RES *result = mysql_store_result(mysql);
+        m_lock.unlock();
+
+        if (query_res != 0) {
+            // 数据库查询失败
+            const char *response = R"({"code": 500})";
+            add_status_line(500, "Internal Server Error");
+            add_content_type("application/json");
+            add_headers(strlen(response));
+            add_content(response);
+            m_iv[0].iov_base = m_write_buf;
+            m_iv[0].iov_len = m_write_idx;
+            m_iv_count = 1;
+            bytes_to_send = m_write_idx;
+            return FILE_REQUEST;
+        }
+
+        MYSQL_ROW row = mysql_fetch_row(result);
+        bool user_exists = (row != nullptr);
+        mysql_free_result(result);
+
+        char sql_update[512];
+        if (user_exists) {
+            // 更新数据
+            snprintf(sql_update, sizeof(sql_update), "UPDATE user_data SET data='%s' WHERE userid=%ld", data.c_str(), userid);
+        } else {
+            // 插入新数据
+            snprintf(sql_update, sizeof(sql_update), "INSERT INTO user_data (userid, data) VALUES (%ld, '%s')", userid, data.c_str());
+        }
+
+        m_lock.lock();
+        int update_res = mysql_query(mysql, sql_update);
+        m_lock.unlock();
+
+        if (update_res == 0) {
+            // 更新或插入成功
+            const char *response = R"({"code": 100})";
+            add_status_line(200, "OK");
+            add_content_type("application/json");
+            add_headers(strlen(response));
+            add_content(response);
+            m_iv[0].iov_base = m_write_buf;
+            m_iv[0].iov_len = m_write_idx;
+            m_iv_count = 1;
+            bytes_to_send = m_write_idx;
+            return FILE_REQUEST;
+        } else {
+            // 更新或插入失败
+            const char *response = R"({"code": 500})";
+            add_status_line(500, "Internal Server Error");
+            add_content_type("application/json");
+            add_headers(strlen(response));
+            add_content(response);
+            m_iv[0].iov_base = m_write_buf;
+            m_iv[0].iov_len = m_write_idx;
+            m_iv_count = 1;
+            bytes_to_send = m_write_idx;
+            return FILE_REQUEST;
+        }
+    }
+
+    else {
+        const char *response = R"({"msg": Wrong url! Please check the url!})";
+        add_status_line(200, "OK");
+        add_content_type("application/json");
+        add_headers(strlen(response));
+        add_content(response);
+        m_iv[0].iov_base = m_write_buf;
+        m_iv[0].iov_len = m_write_idx;
+        m_iv_count = 1;
+        bytes_to_send = m_write_idx;
+        return FILE_REQUEST;
+        // strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
+    }
 
     if (stat(m_real_file, &m_file_stat) < 0)
         return NO_RESOURCE;
@@ -605,8 +839,10 @@ bool http_conn::add_content_length(int content_len)
 {
     return add_response("Content-Length:%d\r\n", content_len);
 }
-bool http_conn::add_content_type()
-{
+bool http_conn::add_content_type(const char *type = nullptr) {
+    if (type) {
+        return add_response("Content-Type:%s\r\n", type);
+    }
     return add_response("Content-Type:%s\r\n", "text/html");
 }
 bool http_conn::add_linger()
@@ -665,10 +901,14 @@ bool http_conn::process_write(HTTP_CODE ret)
             }
             else
             {
-                const char *ok_string = "<html><body></body></html>";
-                add_headers(strlen(ok_string));
-                if (!add_content(ok_string))
-                    return false;
+                // 打印日志：客户端 IP、URL 和响应码
+                char client_ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &m_address.sin_addr, client_ip, INET_ADDRSTRLEN);
+                cout << "Client IP: " << client_ip
+                     << ", URL: " << (m_url ? m_url : "/")
+                     << ", Response Code: " << "200"
+                     << endl;
+                return true;
             }
         }
         default:
