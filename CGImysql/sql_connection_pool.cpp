@@ -28,7 +28,7 @@ void connection_pool::init(string url, string User, string PassWord, string DBNa
 
     lock.lock();
     for (unsigned int i = 0; i < MaxConn; i++) {
-        string connectionString = "dbname=" + DatabaseName + " user=" + User + " password=" + PassWord + " host=" + url + " port="+Port;
+        string connectionString = "dbname=" + DatabaseName + " user=" + User + " password=" + PassWord + " host=" + url + " port=" + to_string(Port);
         try {
             // 创建连接对象
             connection *conn = new connection(connectionString);

@@ -13,6 +13,139 @@
 - http下
   - 迁移到使用迁移后的PostgreSQL连接池实现
 
+## api接口
+
+新增：
+
+### 健康检查
+
+Request:
+
+```
+GET /ping HTTP/1.1
+```
+
+Response:
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/plain
+success
+```
+
+### 玩家信息的创建
+
+1. 功能描述
+
+* 根据请求中的设备ID（“deviceid”）注册玩家的游戏ID（"userid"），创建成功写入user_info
+* deviceid 不允许存在空值，且长度为36
+* deviceid与userid是一对一的关系
+* 如果deviceid已经创建过记录，直接将对应的userid返回
+
+2. 请求示例
+
+Request:
+
+```
+POST /api/bind HTTP/1.1
+Accept-Encoding: gzip, deflate, br
+Content-Type: application/json
+{
+"deviceid": "f60da85d-26b2-402b-84f4-b35ee14752f3"
+}
+```
+
+Response:
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+{
+"code": 100,
+"userid": 10001
+}
+```
+
+状态码（"code"）解释：
+
+* 创建成功：100
+* deviceid为空或非法值：104
+* devideid已经注册过：102
+
+创新：引入rapidjson库，增加对post请求的json内容的解析能力。
+
+### 玩家信息的更新
+
+1. 功能描述
+   解析请求中的data内容，并保存到user_data表中
+2. 请求示例
+
+Request:
+
+```
+POST /api/upload HTTP/1.1
+Accept-Encoding: gzip, deflate, br
+Content-Type: application/json
+{
+"userid": 10001,
+"data": "exp:100;gold:100"
+}
+```
+
+Response:
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+{
+"code": 100
+}
+```
+
+状态码（"code"）解释：
+
+* 更新成功：100
+* data为非法值：104
+
+## 安装rapidJson
+
+1. 下载 RapidJSON 源码：
+
+```
+git clone https://github.com/Tencent/rapidjson.git
+```
+
+2. 将 RapidJSON 的 include 目录添加到你的项目中：
+
+```
+cd rapidjson
+mkdir -p /usr/local/include/rapidjson
+cp -r include/rapidjson /usr/local/include/
+```
+
+3. 验证安装： 检查 /usr/local/include/rapidjson 目录是否存在：
+
+```
+ls /usr/local/include/rapidjson
+```
+
+4. 在项目中使用 RapidJSON
+   在项目的源代码中引入 RapidJSON 头文件：
+
+```cpp
+#include <rapidjson/document.h>
+#include <rapidjson/writer.h>
+#include <rapidjson/stringbuffer.h>
+```
+
+## 运行环境
+
+操作系统：CentOS 7
+
+编译环境： GCC 9.4
+
+docker镜像地址：docker pull crpi-jngze0ih2fs8l05k.cn-beijing.personal.cr.aliyuncs.com/qrn_images/centos7.9_gcc9.4:v1
+
 ## 原Readme
 
 项目介绍：本项目自研项目，旨在实践网络编程及相关开发技术的学习。 个人职责：后端开发 工作内容：【高并发】基于线程池、非阻塞 socket、IO 多路复用技术（ET 模式的epoll）、及 Reactor 事件处理模式实现高并发。【内存池】使用TLS（线程局部存储）内存池，统一申请和释放服务器通信连接所需的内存，减少系统内存碎片。TLS内存池设计为3层结构：线程缓冲存储+中心缓冲存储+页缓冲存储。【数据库连接池】采用 RAII 机制的数据库连接池，池化技术提高登录验证效率，RAII 机制避免内存泄漏。【时间轮】使用基于时间轮的定时器关闭超时请求，解决超时连接占用系统资源问题。 

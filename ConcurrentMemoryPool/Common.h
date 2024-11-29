@@ -228,10 +228,14 @@ public:
         while (cur != _head)
         {
             Span* next = cur->_next;
+            _mutex.lock();
             delete cur;
+            _mutex.unlock();
             cur = next;
         }
+        _mutex.lock();
         delete _head;
+        _mutex.unlock();
         _head = nullptr;
     }
 

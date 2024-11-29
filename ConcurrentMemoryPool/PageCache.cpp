@@ -45,8 +45,17 @@ void PageCache::FreeBigPageObj(void* ptr, Span* span)
     else
     {
         _idspanmap.erase(npage);
+        _mutex.lock();
         delete span;
-        free(ptr);
+        _mutex.unlock();
+        // try {
+        //     if (ptr) free(ptr);
+        // }
+        // catch (const std::exception &e){
+        //     cout << e.what() << endl;
+        // }
+        // if (ptr) free(ptr);
+        
     }
 }
 
@@ -147,8 +156,16 @@ void PageCache::ReleaseSpanToPageCache(Span* cur)
         void* ptr = (void*)(cur->_pageid << PAGE_SHIFT);
         // ¹é»¹Ö®Ç°É¾³ýµôÒ³µ½spanµÄÓ³Éä
         _idspanmap.erase(cur->_pageid);
-        free(ptr);
+        // try {
+        //     if (ptr) free(ptr);
+        // }
+        // catch (const std::exception &e){
+        //     cout << e.what() << endl;
+        // }
+        lock.lock();
+        if (ptr) free(ptr);
         delete cur;
+        lock.unlock();
         return;
     }
 
@@ -189,8 +206,9 @@ void PageCache::ReleaseSpanToPageCache(Span* cur)
         {
             _idspanmap[cur->_pageid + i] = prev;
         }
+        lock.lock();
         delete cur;
-
+        lock.unlock();
         // ¼ÌÐøÏòÇ°ºÏ²¢
         cur = prev;
     }
@@ -228,8 +246,9 @@ void PageCache::ReleaseSpanToPageCache(Span* cur)
         {
             _idspanmap[next->_pageid + i] = cur;
         }
-
+        lock.lock();
         delete next;
+        lock.unlock();
     }
 
     // ×îºó½«ºÏ²¢ºÃµÄspan²åÈëµ½spanÁ´ÖÐ

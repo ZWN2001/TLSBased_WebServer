@@ -3,21 +3,24 @@
 #include <map>
 #include <pqxx/pqxx>
 #include <fstream>
+#include <rapidjson/document.h>
+#include <rapidjson/writer.h>
+#include <rapidjson/stringbuffer.h>
+#include <chrono>
+#include <iomanip>
+#include <ctime>
 
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <rapidjson/document.h>
-#include <rapidjson/writer.h>
-#include <rapidjson/stringbuffer.h>
 
 using namespace pqxx;
 
 #define connfdET //边缘触发非阻塞
-//#define connfdLT //水平触发阻塞
+// #define connfdLT //水平触发阻塞
 
 #define listenfdET //边缘触发非阻塞
-//#define listenfdLT //水平触发阻塞
+// #define listenfdLT //水平触发阻塞
 
 //定义http响应的一些状态信息
 const char *ok_200_title = "OK";
@@ -30,32 +33,12 @@ const char *error_404_form = "The requested file was not found on this server.\n
 const char *error_500_title = "Internal Error";
 const char *error_500_form = "There was an unusual problem serving the request file.\n";
 
-//当浏览器出现连接重置时，可能是网站根目录出错或http响应格式出错或者访问的文件中内容完全为空
-const char *doc_root = "/home/ningmeng/server/root";
-
-//将表中的用户名和密码放入map
-map<string, string> users;
 locker m_lock;
 
 void http_conn::initpostgres_result(connection_pool *connPool) {
     // 从连接池中获取一个 PostgreSQL 连接
     connection *conn = nullptr;
     connectionRAII postgrescon(&conn, connPool);
-
-    try {
-        // 执行 SQL 查询，检索 `username` 和 `passwd` 数据
-        nontransaction txn(*conn);
-        result res = txn.exec("SELECT username, passwd FROM user");
-
-        // 遍历结果集，将用户名和密码存入 `users` map 中
-        for (const auto &row : res) {
-            std::string username = row["username"].c_str();
-            std::string password = row["passwd"].c_str();
-            users[username] = password;
-        }
-    } catch (const std::exception &e) {
-        LOG_ERROR("PostgreSQL SELECT error: %s", e.what());
-    }
 }
 
 //对文件描述符设置非阻塞
@@ -130,8 +113,16 @@ void http_conn::close_conn(bool real_close)
         removefd(m_epollfd, m_sockfd);
         m_sockfd = -1;
         m_user_count--;
+        // ConcurrentFree(m_read_buf);
+        // ConcurrentFree(m_write_buf);
+        // ConcurrentFree(m_real_file);
     }
 }
+
+// void foo() {
+//     int* ptr = nullptr;
+//     *ptr = 42;  // 这会导致段错误
+// }
 
 //初始化连接,外部调用初始化套接字地址
 void http_conn::init(int sockfd, const sockaddr_in &addr)
@@ -140,6 +131,7 @@ void http_conn::init(int sockfd, const sockaddr_in &addr)
     m_address = addr;
     addfd(m_epollfd, sockfd, true);
     m_user_count++;
+    // foo();
     init();
 }
 
@@ -290,9 +282,6 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char *text)
 
     if (!m_url || m_url[0] != '/')
         return BAD_REQUEST;
-    //当url为/时，显示判断界面
-    if (strlen(m_url) == 1)
-        strcat(m_url, "judge.html");
     m_check_state = CHECK_STATE_HEADER;
     return NO_REQUEST;
 }
@@ -333,7 +322,7 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
     else
     {
         //printf("oop!unknow header: %s\n",text);
-        LOG_INFO("oop!unknow header: %s", text);
+        // LOG_INFO("oop!unknow header: %s", text);
         Log::get_instance()->flush();
     }
     return NO_REQUEST;
@@ -362,7 +351,7 @@ http_conn::HTTP_CODE http_conn::process_read()
     {
         text = get_line();
         m_start_line = m_checked_idx;
-        LOG_INFO("%s", text);
+        // LOG_INFO("%s", text);
         Log::get_instance()->flush();
         switch (m_check_state)
         {
@@ -401,128 +390,17 @@ http_conn::HTTP_CODE http_conn::process_read()
 
 http_conn::HTTP_CODE http_conn::do_request()
 {
-    strcpy(m_real_file, doc_root);
-    int len = strlen(doc_root);
-    const char *p = strrchr(m_url, '/');
-
-    if (cgi == 1 && (*(p + 1) == '2' || *(p + 1) == '3')) {
-        char flag = m_url[1];
-        char *m_url_real = (char *)ConcurrentAlloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/");
-        strcat(m_url_real, m_url + 2);
-        strncpy(m_real_file + len, m_url_real, FILENAME_LEN - len - 1);
-        ConcurrentFree(m_url_real);
-
-        // 提取用户名和密码
-        char name[100], password[100];
-        int i;
-        for (i = 5; m_string[i] != '&'; ++i)
-            name[i - 5] = m_string[i];
-        name[i - 5] = '\0';
-
-        int j = 0;
-        for (i = i + 10; m_string[i] != '\0'; ++i, ++j)
-            password[j] = m_string[i];
-        password[j] = '\0';
-
-        // 注册逻辑
-        if (*(p + 1) == '3') {
-            try {
-                if (users.find(name) == users.end()) {
-                    // 插入新用户到数据库
-                    work txn(*postgres_conn);
-                    txn.exec("INSERT INTO user (username, passwd) VALUES (" +
-                             txn.quote(name) + ", " + txn.quote(password) + ")");
-                    txn.commit();
-
-                    // 更新本地缓存
-                    m_lock.lock();
-                    users[name] = password;
-                    m_lock.unlock();
-
-                    strcpy(m_url, "/log.html");
-                } else {
-                    strcpy(m_url, "/registerError.html");
-                }
-            } catch (const std::exception &e) {
-                LOG_ERROR("PostgreSQL INSERT error: %s", e.what());
-                strcpy(m_url, "/registerError.html");
-            }
-        }
-
-        // 登录逻辑
-        if (*(p + 1) == '2') {
-            if (users.find(name) != users.end() && users[name] == password) {
-                strcpy(m_url, "/welcome.html");
-            } else {
-                strcpy(m_url, "/logError.html");
-            }
-        }
-    }
-
-    if (*(p + 1) == '0')
-    {
-        char *m_url_real = (char *)ConcurrentAlloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/register.html");
-        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
-        ConcurrentFree(m_url_real);
-    }
-    else if (*(p + 1) == '1')
-    {
-        char *m_url_real = (char *)ConcurrentAlloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/log.html");
-        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
-        ConcurrentFree(m_url_real);
-    }
-    else if (*(p + 1) == '5')
-    {
-        char *m_url_real = (char *)ConcurrentAlloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/picture.html");
-        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
-        ConcurrentFree(m_url_real);
-    }
-    else if (*(p + 1) == '6')
-    {
-        char *m_url_real = (char *)ConcurrentAlloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/video.html");
-        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
-        ConcurrentFree(m_url_real);
-    }
-    else if (*(p + 1) == '7')
-    {
-        char *m_url_real = (char *)ConcurrentAlloc(sizeof(char) * 200);
-        strcpy(m_url_real, "/fans.html");
-        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
-        ConcurrentFree(m_url_real);
-    }
-    else if (strcmp(m_url, "/ping") == 0) {
-        // cout << "it is ping!" << endl;
-        const char *ping_response = "success";
-        add_status_line(200, "OK");
-        add_content_type("text/plain");
-        add_headers(strlen(ping_response));
-        if (!add_content(ping_response)) {
-            return INTERNAL_ERROR;
-        }
-        m_iv[0].iov_base = m_write_buf;
-        m_iv[0].iov_len = m_write_idx;
-        m_iv_count = 1;
-        bytes_to_send = m_write_idx;
-        return FILE_REQUEST;
-    }
-    else if (strcmp(m_url, "/api/bind") == 0 && m_method == POST) {
-        // 解析 POST 请求中的 JSON 数据
-        const char *json_data = m_string;
-        rapidjson::Document doc;
-        doc.Parse(json_data);
-
-        if (!doc.HasMember("deviceid") || !doc["deviceid"].IsString()) {
-            // deviceid 为空或格式非法
-            const char *response = R"({"code": 104})";
+    // ningmeng
+    try {
+        // pqxx::connection conn(conn_str);  // 创建数据库连接
+        work txn(*postgres_conn);  // 创建事务
+        // cout << m_url << endl;
+        if (strcmp(m_url, "/ping") == 0) {
+            const char *ping_response = "success";
             add_status_line(200, "OK");
-            add_content_type("application/json");
-            add_headers(strlen(response));
-            add_content(response);
+            add_content_type("text/plain");
+            add_headers(strlen(ping_response));
+            add_content(ping_response);
             m_iv[0].iov_base = m_write_buf;
             m_iv[0].iov_len = m_write_idx;
             m_iv_count = 1;
@@ -530,38 +408,15 @@ http_conn::HTTP_CODE http_conn::do_request()
             return FILE_REQUEST;
         }
 
-        std::string deviceid = doc["deviceid"].GetString();
+        // 处理 /api/bind
+        else if (strcmp(m_url, "/api/bind") == 0 && m_method == POST) {
+            // 解析 JSON 数据
+            const char *json_data = m_string;
+            rapidjson::Document doc;
+            doc.Parse(json_data);
 
-        if (deviceid.length() != 36) {
-            // deviceid 长度非法
-            const char *response = R"({"code": 104})";
-            add_status_line(200, "OK");
-            add_content_type("application/json");
-            add_headers(strlen(response));
-            add_content(response);
-            m_iv[0].iov_base = m_write_buf;
-            m_iv[0].iov_len = m_write_idx;
-            m_iv_count = 1;
-            bytes_to_send = m_write_idx;
-            return FILE_REQUEST;
-        }
-
-        // 查询数据库是否已存在此 deviceid
-        char sql_query[256];
-        snprintf(sql_query, sizeof(sql_query), "SELECT userid FROM user_info WHERE deviceid='%s'", deviceid.c_str());
-        m_lock.lock();
-        int query_res = mysql_query(mysql, sql_query);
-        MYSQL_RES *result = mysql_store_result(mysql);
-        m_lock.unlock();
-
-        if (query_res == 0 && result != NULL) {
-            MYSQL_ROW row = mysql_fetch_row(result);
-            if (row) {
-                // deviceid 已存在，返回对应的 userid
-                long userid = atol(row[0]);
-                mysql_free_result(result);
-                char response[128];
-                snprintf(response, sizeof(response), R"({"code": 102, "userid": %ld})", userid);
+            if (!doc.HasMember("deviceid") || !doc["deviceid"].IsString()) {
+                const char *response = R"({"code": 104})";
                 add_status_line(200, "OK");
                 add_content_type("application/json");
                 add_headers(strlen(response));
@@ -572,21 +427,168 @@ http_conn::HTTP_CODE http_conn::do_request()
                 bytes_to_send = m_write_idx;
                 return FILE_REQUEST;
             }
-            mysql_free_result(result);
+
+            std::string deviceid = doc["deviceid"].GetString();
+
+            if (deviceid.length() != 36) {
+                const char *response = R"({"code": 104})";
+                add_status_line(200, "OK");
+                add_content_type("application/json");
+                add_headers(strlen(response));
+                add_content(response);
+                m_iv[0].iov_base = m_write_buf;
+                m_iv[0].iov_len = m_write_idx;
+                m_iv_count = 1;
+                bytes_to_send = m_write_idx;
+                return FILE_REQUEST;
+            }
+
+            // 查询 PostgreSQL 是否已存在此 deviceid
+            std::string sql_query = "SELECT userid FROM user_info WHERE deviceid = " + txn.quote(deviceid);
+            result res = txn.exec(sql_query);
+
+            if (!res.empty()) {
+                // deviceid 已存在，返回对应的 userid
+                long userid = res[0][0].as<long>();
+                char response[128];
+                snprintf(response, sizeof(response), R"({"code": 102, "userid": %ld})", userid);
+                // std::string response = "{\"code\": 102, \"userid\": " + std::to_string(userid) + "}";
+                add_status_line(200, "OK");
+                add_content_type("application/json");
+                add_headers(strlen(response));
+                add_content(response);
+                m_iv[0].iov_base = m_write_buf;
+                m_iv[0].iov_len = m_write_idx;
+                m_iv_count = 1;
+                bytes_to_send = m_write_idx;
+                return FILE_REQUEST;
+            }
+
+            // 如果 deviceid 不存在，则创建新记录
+            std::string sql_insert = "INSERT INTO user_info (deviceid) VALUES (" + txn.quote(deviceid) + ") RETURNING userid";
+            m_lock.lock();
+            result insert_res = txn.exec(sql_insert);
+            txn.commit();
+            m_lock.unlock();
+            if (!insert_res.empty()) {
+                long userid = insert_res[0][0].as<long>();
+                char response[128];
+                snprintf(response, sizeof(response), R"({"code": 100, "userid": %ld})", userid);
+                add_status_line(200, "OK");
+                add_content_type("application/json");
+                add_headers(strlen(response));
+                add_content(response);
+                m_iv[0].iov_base = m_write_buf;
+                m_iv[0].iov_len = m_write_idx;
+                m_iv_count = 1;
+                bytes_to_send = m_write_idx;
+                return FILE_REQUEST;
+            } else {
+                // 数据库插入失败
+                const char *response = R"({"code": 500})";
+                add_status_line(500, "Internal Server Error");
+                add_content_type("application/json");
+                add_headers(strlen(response));
+                add_content(response);
+                m_iv[0].iov_base = m_write_buf;
+                m_iv[0].iov_len = m_write_idx;
+                m_iv_count = 1;
+                bytes_to_send = m_write_idx;
+                return FILE_REQUEST;
+            }
         }
 
-        // 如果 deviceid 不存在，则创建新记录
-        char sql_insert[256];
-        snprintf(sql_insert, sizeof(sql_insert), "INSERT INTO user_info (deviceid) VALUES ('%s')", deviceid.c_str());
-        m_lock.lock();
-        int insert_res = mysql_query(mysql, sql_insert);
-        long userid = mysql_insert_id(mysql);  // 获取自增生成的 userid
-        m_lock.unlock();
+        // 处理 /api/upload
+        else if (strcmp(m_url, "/api/upload") == 0 && m_method == POST) {
+            // 解析 JSON 数据
+            const char *json_data = m_string;
+            rapidjson::Document doc;
 
-        if (insert_res == 0) {
-            // 返回创建成功的响应
-            char response[128];
-            snprintf(response, sizeof(response), R"({"code": 100, "userid": %ld})", userid);
+            doc.Parse(json_data);
+            // cout << doc["userid"].GetInt64() << endl;
+            // cout << doc["data"].GetString() << endl;
+            if (!doc.HasMember("userid") || !doc["userid"].IsInt64() ||
+                !doc.HasMember("data") || !doc["data"].IsString()) {
+                const char *response = R"({"code": 104})";
+                add_status_line(200, "OK");
+                add_content_type("application/json");
+                add_headers(strlen(response));
+                add_content(response);
+                m_iv[0].iov_base = m_write_buf;
+                m_iv[0].iov_len = m_write_idx;
+                m_iv_count = 1;
+                bytes_to_send = m_write_idx;
+                return FILE_REQUEST;
+            }
+
+            long userid = doc["userid"].GetInt64();
+            std::string data = doc["data"].GetString();
+
+            if (data.length() > 256) {
+                const char *response = R"({"code": 104})";
+                add_status_line(200, "OK");
+                add_content_type("application/json");
+                add_headers(strlen(response));
+                add_content(response);
+                m_iv[0].iov_base = m_write_buf;
+                m_iv[0].iov_len = m_write_idx;
+                m_iv_count = 1;
+                bytes_to_send = m_write_idx;
+                return FILE_REQUEST;
+            }
+
+            // 检查 PostgreSQL 中是否存在该 userid
+            // m_lock.lock();
+            std::string sql_query = "INSERT INTO user_data (userid, data) VALUES (" 
+                        + txn.quote(userid) + ", " + txn.quote(data) 
+                        + ") ON CONFLICT (userid) DO UPDATE SET data = " 
+                        + txn.quote(data);
+            // std::string sql_query = "SELECT userid FROM user_data WHERE userid = " + txn.quote(userid);
+            // result res = txn.exec(sql_query);
+            // // m_lock.unlock();
+            // bool user_exists = !res.empty();
+
+            // std::string sql_update;
+            // if (user_exists) {
+            //     // 更新数据
+            //     sql_update = "UPDATE user_data SET data = " + txn.quote(data) + " WHERE userid = " + txn.quote(userid);
+            // } else {
+            //     // 插入新数据
+            //     sql_update = "INSERT INTO user_data (userid, data) VALUES (" + txn.quote(userid) + ", " + txn.quote(data) + ")";
+            // }
+            m_lock.lock();
+            result update_res = txn.exec(sql_query);
+            txn.commit();
+            m_lock.unlock();
+            if (update_res.affected_rows() > 0) {
+                const char *response = R"({"code": 100})";
+                add_status_line(200, "OK");
+                add_content_type("application/json");
+                add_headers(strlen(response));
+                add_content(response);
+                m_iv[0].iov_base = m_write_buf;
+                m_iv[0].iov_len = m_write_idx;
+                m_iv_count = 1;
+                bytes_to_send = m_write_idx;
+                return FILE_REQUEST;
+            } else {
+                // 更新或插入失败
+                const char *response = R"({"code": 500})";
+                add_status_line(500, "Internal Server Error");
+                add_content_type("application/json");
+                add_headers(strlen(response));
+                add_content(response);
+                m_iv[0].iov_base = m_write_buf;
+                m_iv[0].iov_len = m_write_idx;
+                m_iv_count = 1;
+                bytes_to_send = m_write_idx;
+                return FILE_REQUEST;
+            }
+        }
+
+        // 其他请求处理
+        else {
+            const char *response = R"({"msg": "Wrong url! Please check the url!"})";
             add_status_line(200, "OK");
             add_content_type("application/json");
             add_headers(strlen(response));
@@ -596,128 +598,13 @@ http_conn::HTTP_CODE http_conn::do_request()
             m_iv_count = 1;
             bytes_to_send = m_write_idx;
             return FILE_REQUEST;
-        } else {
-            // 数据库插入失败
-            const char *response = R"({"code": 500})";
-            add_status_line(500, "Internal Server Error");
-            add_content_type("application/json");
-            add_headers(strlen(response));
-            add_content(response);
-            m_iv[0].iov_base = m_write_buf;
-            m_iv[0].iov_len = m_write_idx;
-            m_iv_count = 1;
-            bytes_to_send = m_write_idx;
-            return FILE_REQUEST;
-        }
-    }
-    else if (strcmp(m_url, "/api/upload") == 0 && m_method == POST) {
-        // 解析 POST 请求中的 JSON 数据
-        const char *json_data = m_string;
-        rapidjson::Document doc;
-        doc.Parse(json_data);
-
-        if (!doc.HasMember("userid") || !doc["userid"].IsInt64() ||
-            !doc.HasMember("data") || !doc["data"].IsString()) {
-            // 参数缺失或格式非法
-            const char *response = R"({"code": 104})";
-            add_status_line(200, "OK");
-            add_content_type("application/json");
-            add_headers(strlen(response));
-            add_content(response);
-            m_iv[0].iov_base = m_write_buf;
-            m_iv[0].iov_len = m_write_idx;
-            m_iv_count = 1;
-            bytes_to_send = m_write_idx;
-            return FILE_REQUEST;
         }
 
-        // 提取参数
-        long userid = doc["userid"].GetInt64();
-        std::string data = doc["data"].GetString();
-
-        if (data.length() > 256) {
-            // data 长度非法
-            const char *response = R"({"code": 104})";
-            add_status_line(200, "OK");
-            add_content_type("application/json");
-            add_headers(strlen(response));
-            add_content(response);
-            m_iv[0].iov_base = m_write_buf;
-            m_iv[0].iov_len = m_write_idx;
-            m_iv_count = 1;
-            bytes_to_send = m_write_idx;
-            return FILE_REQUEST;
-        }
-
-        // 检查数据库中是否存在该 userid
-        char sql_query[256];
-        snprintf(sql_query, sizeof(sql_query), "SELECT userid FROM user_data WHERE userid=%ld", userid);
-        m_lock.lock();
-        int query_res = mysql_query(mysql, sql_query);
-        MYSQL_RES *result = mysql_store_result(mysql);
-        m_lock.unlock();
-
-        if (query_res != 0) {
-            // 数据库查询失败
-            const char *response = R"({"code": 500})";
-            add_status_line(500, "Internal Server Error");
-            add_content_type("application/json");
-            add_headers(strlen(response));
-            add_content(response);
-            m_iv[0].iov_base = m_write_buf;
-            m_iv[0].iov_len = m_write_idx;
-            m_iv_count = 1;
-            bytes_to_send = m_write_idx;
-            return FILE_REQUEST;
-        }
-
-        MYSQL_ROW row = mysql_fetch_row(result);
-        bool user_exists = (row != nullptr);
-        mysql_free_result(result);
-
-        char sql_update[512];
-        if (user_exists) {
-            // 更新数据
-            snprintf(sql_update, sizeof(sql_update), "UPDATE user_data SET data='%s' WHERE userid=%ld", data.c_str(), userid);
-        } else {
-            // 插入新数据
-            snprintf(sql_update, sizeof(sql_update), "INSERT INTO user_data (userid, data) VALUES (%ld, '%s')", userid, data.c_str());
-        }
-
-        m_lock.lock();
-        int update_res = mysql_query(mysql, sql_update);
-        m_lock.unlock();
-
-        if (update_res == 0) {
-            // 更新或插入成功
-            const char *response = R"({"code": 100})";
-            add_status_line(200, "OK");
-            add_content_type("application/json");
-            add_headers(strlen(response));
-            add_content(response);
-            m_iv[0].iov_base = m_write_buf;
-            m_iv[0].iov_len = m_write_idx;
-            m_iv_count = 1;
-            bytes_to_send = m_write_idx;
-            return FILE_REQUEST;
-        } else {
-            // 更新或插入失败
-            const char *response = R"({"code": 500})";
-            add_status_line(500, "Internal Server Error");
-            add_content_type("application/json");
-            add_headers(strlen(response));
-            add_content(response);
-            m_iv[0].iov_base = m_write_buf;
-            m_iv[0].iov_len = m_write_idx;
-            m_iv_count = 1;
-            bytes_to_send = m_write_idx;
-            return FILE_REQUEST;
-        }
-    }
-
-    else {
-        const char *response = R"({"msg": Wrong url! Please check the url!})";
-        add_status_line(200, "OK");
+    } catch (const std::exception& e) {
+        // 错误处理：数据库连接或查询失败
+        std::cerr << "Error: " << e.what() << std::endl;
+        const char *response = R"({"code": 500})";
+        add_status_line(500, "Internal Server Error");
         add_content_type("application/json");
         add_headers(strlen(response));
         add_content(response);
@@ -726,18 +613,7 @@ http_conn::HTTP_CODE http_conn::do_request()
         m_iv_count = 1;
         bytes_to_send = m_write_idx;
         return FILE_REQUEST;
-        // strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
     }
-
-    if (stat(m_real_file, &m_file_stat) < 0)
-        return NO_RESOURCE;
-    if (!(m_file_stat.st_mode & S_IROTH))
-        return FORBIDDEN_REQUEST;
-    if (S_ISDIR(m_file_stat.st_mode))
-        return BAD_REQUEST;
-    int fd = open(m_real_file, O_RDONLY);
-    m_file_address = (char *)mmap(0, m_file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
     return FILE_REQUEST;
 }
 void http_conn::unmap()
@@ -821,7 +697,7 @@ bool http_conn::add_response(const char *format, ...)
     }
     m_write_idx += len;
     va_end(arg_list);
-    LOG_INFO("request:%s", m_write_buf);
+    // LOG_INFO("request:%s", m_write_buf);
     Log::get_instance()->flush();
     return true;
 }
@@ -901,13 +777,15 @@ bool http_conn::process_write(HTTP_CODE ret)
             }
             else
             {
-                // 打印日志：客户端 IP、URL 和响应码
-                char client_ip[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &m_address.sin_addr, client_ip, INET_ADDRSTRLEN);
-                cout << "Client IP: " << client_ip
-                     << ", URL: " << (m_url ? m_url : "/")
-                     << ", Response Code: " << "200"
-                     << endl;
+                // char client_ip[INET_ADDRSTRLEN];
+                // auto now = std::chrono::system_clock::now();
+                // std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+                // inet_ntop(AF_INET, &m_address.sin_addr, client_ip, INET_ADDRSTRLEN);
+                // cout << "Client IP: " << client_ip 
+                //         << ", Time: " << std::put_time(std::localtime(&now_time), "%F %T")
+                //         << ", URL: " << (m_url ? m_url : "/") 
+                //         << ", Response Code: " << "200" 
+                //         << endl;
                 return true;
             }
         }
@@ -933,6 +811,7 @@ void http_conn::process()
     {
         close_conn();
     }
+
     modfd(m_epollfd, m_sockfd, EPOLLOUT);
 }
 

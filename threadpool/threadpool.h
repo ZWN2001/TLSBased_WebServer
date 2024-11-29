@@ -31,6 +31,7 @@ private:
     sem m_queuestat;            //是否有任务需要处理
     bool m_stop;                //是否结束线程
     connection_pool *m_connPool;  //数据库
+    locker thread_lock;
 };
 template <typename T>
 threadpool<T>::threadpool( connection_pool *connPool, int thread_number, int max_requests) : m_thread_number(thread_number), m_max_requests(max_requests), m_stop(false), m_threads(NULL),m_connPool(connPool)
@@ -45,12 +46,16 @@ threadpool<T>::threadpool( connection_pool *connPool, int thread_number, int max
         //printf("create the %dth thread\n",i);
         if (pthread_create(m_threads + i, NULL, worker, this) != 0)
         {
+            thread_lock.lock();
             delete[] m_threads;
+            thread_lock.unlock();
             throw std::exception();
         }
         if (pthread_detach(m_threads[i]))
         {
+            thread_lock.lock();
             delete[] m_threads;
+            thread_lock.unlock();
             throw std::exception();
         }
     }
@@ -58,7 +63,9 @@ threadpool<T>::threadpool( connection_pool *connPool, int thread_number, int max
 template <typename T>
 threadpool<T>::~threadpool()
 {
+    thread_lock.lock();
     delete[] m_threads;
+    thread_lock.unlock();
     m_stop = true;
 }
 template <typename T>

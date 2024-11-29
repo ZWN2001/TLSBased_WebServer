@@ -8,7 +8,7 @@ Span* CentralCache::GetOneSpan(SpanList& spanlist, size_t byte_size)
     Span* span = spanlist.Begin();
     while (span != spanlist.End())//µ±Ç°ÕÒµ½Ò»¸öspan
     {
-        if (span->_list != nullptr)
+        if (span != nullptr && span->_list != nullptr)
             return span;
         else
             span = span->_next;

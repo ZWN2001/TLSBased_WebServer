@@ -17,15 +17,21 @@
 #include "./log/log.h"
 #include "./CGImysql/sql_connection_pool.h"
 
+#include "backward.hpp"
+
+namespace backward {
+    SignalHandling sh;  // 初始化信号处理
+}
+
 #define MAX_FD 65536           //最大文件描述符
-#define MAX_EVENT_NUMBER 10000 //最大事件数
+#define MAX_EVENT_NUMBER 65536 //最大事件数
 #define TIMESLOT 5             //最小超时单位
 
 #define SYNLOG  //同步写日志
 //#define ASYNLOG //异步写日志
 
-//#define listenfdET //边缘触发非阻塞
-#define listenfdLT //水平触发阻塞
+#define listenfdET //边缘触发非阻塞
+// #define listenfdLT //水平触发阻塞
 
 //这三个函数在http_conn.cpp中定义，改变链接属性
 extern int addfd(int epollfd, int fd, bool one_shot);
@@ -42,6 +48,8 @@ static time_wheel timeWheel;
 
 
 static int epollfd = 0;
+
+locker mutex_m;
 
 //信号处理函数：仅通过管道发送信号值，不处理信号对应的逻辑，缩短异步执行时间，减少对主程序的影响
 void sig_handler(int sig)
@@ -78,13 +86,15 @@ void timer_handler()
 //定时器回调函数
 void cb_func(client_data *user_data)
 {
+    mutex_m.lock();
     // 删除非活动连接在sockfd上的注册事件，并关闭文件描述符
     epoll_ctl(epollfd, EPOLL_CTL_DEL, user_data->sockfd, 0);
     assert(user_data);
     close(user_data->sockfd);
     http_conn::m_user_count--;
-    LOG_INFO("close fd %d", user_data->sockfd);
+    // LOG_INFO("close fd %d", user_data->sockfd);
     Log::get_instance()->flush();
+    mutex_m.unlock();
 }
 
 void show_error(int connfd, const char *info)
@@ -94,8 +104,30 @@ void show_error(int connfd, const char *info)
     close(connfd);
 }
 
+// void foo() {
+//     try {
+//         int* ptr = (int*)malloc(sizeof(int));
+//         free(ptr);
+//         free(ptr);  // 双重释放，可能引发 invalid pointer 错误
+//     }
+//     catch (const std::exception &e){
+//         cout << e.what() << endl;
+//     }
+// }
+
 int main(int argc, char *argv[])
 {
+    // foo();
+    // abort();
+    // foo();
+    // try {
+    //     foo();
+    // } catch (const std::exception& e) {
+    //     backward::StackTrace st;
+    //     st.load_here(32);  // 获取最多32层堆栈信息
+    //     backward::Printer p;
+    //     p.print(st);  // 打印堆栈跟踪
+    // }
 #ifdef ASYNLOG
     Log::get_instance()->init("ServerLog", 2000, 800000, 8); //异步日志模型
 #endif
@@ -104,19 +136,21 @@ int main(int argc, char *argv[])
     Log::get_instance()->init("ServerLog", 2000, 800000, 0); //同步日志模型
 #endif
 
-    if (argc <= 1)
-    {
-        printf("usage: %s ip_address port_number\n", basename(argv[0]));
-        return 1;
-    }
+    // if (argc <= 1)
+    // {
+    //     printf("usage: %s ip_address port_number\n", basename(argv[0]));
+    //     return 1;
+    // }
 
-    int port = atoi(argv[1]);
+    int port = 80;
 
     addsig(SIGPIPE, SIG_IGN);
 
     //创建数据库连接池
+    cout << "db init start!" << endl;
     connection_pool *connPool = connection_pool::GetInstance();
-    connPool->init("localhost", "root", "Chenjunyi1998.", "yourdb", 3306, 8);
+    connPool->init("mfpg15_test", "postgres", "postgres", "postgres", 5432, 50);
+    cout << "db init end!" << endl;
     //创建线程池
     threadpool<http_conn> *pool = NULL;
     pool = new threadpool<http_conn>(connPool);
@@ -215,18 +249,7 @@ int main(int argc, char *argv[])
                 users_timer[connfd].address = client_address;
                 users_timer[connfd].sockfd = connfd;
                 // 创建定时器临时变量
-//                util_timer *timer = new util_timer;
-//                time_wheel_timer *timer = new time_wheel_timer;
-
-                // 设置定时器对应的连接资源
-//                timer->user_data = &users_timer[connfd];
-//                timer->cb_func = cb_func;
-
-//                time_t cur = time(NULL);
-//                time_expire = cur + 3 * TIMESLOT;  // TIMESLOT = 5
                 time_expire = 3 * TIMESLOT;  // TIMESLOT = 5
-//                users_timer[connfd].timer = timer;
-//                timer_lst.add_timer(timer);
                 users_timer[connfd].timer = timeWheel.add_timer(time_expire);
                 users_timer[connfd].timer->cb_func = cb_func;
 
@@ -253,18 +276,7 @@ int main(int argc, char *argv[])
                     //创建定时器，设置回调函数和超时时间，绑定用户数据，将定时器添加到链表中
                     users_timer[connfd].address = client_address;
                     users_timer[connfd].sockfd = connfd;
-//                    util_timer *timer = new util_timer;
-//                    time_wheel_timer *timer = new time_wheel_timer;
-
-//                    timer->user_data = &users_timer[connfd];
-//                    timer->cb_func = cb_func;
-//                    time_t cur = time(NULL);
-//                    timer->expire = cur + 3 * TIMESLOT;
-//                    time_expire = cur + 3 * TIMESLOT;
                     time_expire = 3 * TIMESLOT;
-
-//                    users_timer[connfd].timer = timer;
-//                    timer_lst.add_timer(timer);
                     users_timer[connfd].timer = timeWheel.add_timer(time_expire);
                     users_timer[connfd].timer->cb_func = cb_func;
                 }
@@ -329,7 +341,7 @@ int main(int argc, char *argv[])
                 // 主线程读完成后【users[sockfd].read_once()】，选择一个工作线程来处理客户请求
                 if (users[sockfd].read_once())
                 {
-                    LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+                    // LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
                     Log::get_instance()->flush();
                     //若监测到读事件，将该事件放入线程池的请求队列
                     pool->append(users + sockfd);
@@ -359,7 +371,7 @@ int main(int argc, char *argv[])
                 time_wheel_timer *timer = users_timer[sockfd].timer;
                 if (users[sockfd].write())
                 {
-                    LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+                    // LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
                     Log::get_instance()->flush();
                     //若有数据传输，则将定时器往后延迟3个单位
                     //并对新的定时器在链表上的位置进行调整
@@ -394,8 +406,10 @@ int main(int argc, char *argv[])
     close(listenfd);
     close(pipefd[1]);
     close(pipefd[0]);
+    mutex_m.lock();
     delete[] users;
     delete[] users_timer;
     delete pool;
+    mutex_m.unlock();
     return 0;
 }

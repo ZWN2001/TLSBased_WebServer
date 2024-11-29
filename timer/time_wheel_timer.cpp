@@ -5,11 +5,14 @@
 
 
 time_wheel::~time_wheel() {
+    locker my_lock;
     for (int i = 0; i < N; i++) {
         time_wheel_timer *tmp = slots[i];
         while (tmp) {
             slots[i] = tmp->next;
+            my_lock.lock();
             delete tmp;
+            my_lock.unlock();
             tmp = slots[i];
         }
     }
@@ -35,16 +38,19 @@ time_wheel_timer *time_wheel::add_timer(int timeout) {
     // 如果第ts个槽中尚无任何定时器，则把新建的定时器插入其中，并将该定时器设置为该槽的头结点
     if (!slots[ts]) {
         slots[ts] = timer;
+        // cur_slot = ts;
     }
     else {
         timer->next = slots[ts];
         slots[ts]->prev = timer;
         slots[ts] = timer;
+        // cur_slot = ts;
     }
     return timer;
 }
 
 void time_wheel::del_timer(time_wheel_timer *timer) {
+    locker my_lock;
     if (!timer) {
         return;
     }
@@ -55,24 +61,30 @@ void time_wheel::del_timer(time_wheel_timer *timer) {
         if (slots[ts]) {
             slots[ts]->prev = NULL;
         }
+        my_lock.lock();
         delete timer;
+        my_lock.unlock();
     }
     else {
-        timer->prev->next = timer->next;
+        if (timer->prev) timer->prev->next = timer->next;
+        // timer->prev->next = timer->next;
         if (timer->next) {
             timer->next->prev = timer->prev;
         }
+        my_lock.lock();
         delete timer;
+        my_lock.unlock();
     }
+    
 }
 
 void time_wheel::tick() {
     // 获取当前槽中的定时器
     time_wheel_timer *timer = slots[cur_slot];
-
+    // cout << cur_slot << endl;
     // 如果当前槽没有定时器，则直接返回
     if (!timer) {
-        std::cout << "No timer in current slot." << std::endl;
+        // std::cout << "No timer in current slot." << std::endl;
         return;
     }
 

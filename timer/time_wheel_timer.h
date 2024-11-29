@@ -35,7 +35,7 @@ class time_wheel
 {
 private:
     /* data */
-    static const int N = 60; // 时间轮上的槽的数目
+    static const int N = 30; // 时间轮上的槽的数目
     static const int SI = 1; // 每1s时间轮轮动一次，槽间隔为1s
     time_wheel_timer *slots[N]; // 时间轮的槽，其中每个元素指向一个定时器链表，链表无序
     int cur_slot; // 时间轮的当前槽
